@@ -1,0 +1,8 @@
+flask
+alpaca-trade-api
+pandas
+numpy
+scikit-learn
+ta
+newsapi-python
+requests
