@@ -39,7 +39,7 @@ MAX_DAILY_LOSS_PCT = 0.05
 MAX_TRADES_PER_DAY = 50
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
-ML_CONFIDENCE = 0.6
+ML_CONFIDENCE = 0.5
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -222,7 +222,7 @@ def monitor_positions():
                 logging.error(f"Monitor {key}: {e}")
 
 def generate_signal(df):
-    if df is None or len(df) < 50: return None, "No data"
+    if df is None or len(df) < 50: return None, "No data", "WAIT"
     df = add_indicators(df)
     latest, prev = df.iloc[-1], df.iloc[-2]
     rsi = latest['momentum_rsi']
@@ -230,31 +230,48 @@ def generate_signal(df):
     macd_sig = latest['trend_macd_signal']
     sma_f, sma_s = latest['trend_sma_fast'], latest['trend_sma_slow']
     close = latest['close']
-    bb_l, bb_h = latest['volatility_bbl'], latest['volatility_bbh']
     ml_prob = predict(latest[feature_cols].values)
 
-    buy_cond = sell_cond = 0
+    buy_cond = 0
+    sell_cond = 0
     reasons = []
-    if rsi < 30: buy_cond += 1; reasons.append("RSI oversold")
-    elif rsi > 70: sell_cond += 1; reasons.append("RSI overbought")
-    if macd > macd_sig and prev['momentum_macd'] <= prev['trend_macd_signal']:
-        buy_cond += 1; reasons.append("MACD bull cross")
-    elif macd < macd_sig and prev['momentum_macd'] >= prev['trend_macd_signal']:
-        sell_cond += 1; reasons.append("MACD bear cross")
-    if close < bb_l: buy_cond += 1; reasons.append("Below lower BB")
-    elif close > bb_h: sell_cond += 1; reasons.append("Above upper BB")
-    if sma_f > sma_s and prev['trend_sma_fast'] <= prev['trend_sma_slow']:
-        buy_cond += 1; reasons.append("SMA bull cross")
-    elif sma_f < sma_s and prev['trend_sma_fast'] >= prev['trend_sma_slow']:
-        sell_cond += 1; reasons.append("SMA bear cross")
-    if ml_prob > ML_CONFIDENCE: buy_cond += 1; reasons.append(f"ML up {ml_prob:.2f}")
-    elif ml_prob < (1 - ML_CONFIDENCE): sell_cond += 1; reasons.append(f"ML down {1-ml_prob:.2f}")
+    trend = "WAIT"
+
+    if sma_f > sma_s and close > sma_s:
+        trend = "UPTREND"
+        buy_cond += 1
+        reasons.append("SMA uptrend")
+    elif sma_f < sma_s and close < sma_s:
+        trend = "DOWNTREND"
+        sell_cond += 1
+        reasons.append("SMA downtrend")
+
+    if rsi > 50 and rsi < 70:
+        buy_cond += 1
+        reasons.append("RSI bullish")
+    elif rsi < 50 and rsi > 30:
+        sell_cond += 1
+        reasons.append("RSI bearish")
+
+    if macd > macd_sig:
+        buy_cond += 1
+        reasons.append("MACD bullish")
+    elif macd < macd_sig:
+        sell_cond += 1
+        reasons.append("MACD bearish")
+
+    if ml_prob > 0.5:
+        buy_cond += 1
+        reasons.append(f"ML up {ml_prob:.2f}")
+    else:
+        sell_cond += 1
+        reasons.append(f"ML down {1-ml_prob:.2f}")
 
     if buy_cond >= 3 and sell_cond == 0:
-        return 'buy', "; ".join(reasons)
+        return 'buy', "; ".join(reasons), trend
     if sell_cond >= 3 and buy_cond == 0:
-        return 'sell', "; ".join(reasons)
-    return None, "No strong signal"
+        return 'sell', "; ".join(reasons), trend
+    return None, "No strong signal", trend
 
 def send_telegram(text):
     if TELEGRAM_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN": return
@@ -321,36 +338,16 @@ def handle_telegram_command(chat_id, msg):
             else:
                 df = add_indicators(df)
                 latest = df.iloc[-1]
-                prev = df.iloc[-2]
                 rsi = latest['momentum_rsi']
                 macd = latest['momentum_macd']
                 macd_sig = latest['trend_macd_signal']
                 sma_f = latest['trend_sma_fast']
                 sma_s = latest['trend_sma_slow']
                 close = latest['close']
-                bb_l = latest['volatility_bbl']
-                bb_h = latest['volatility_bbh']
                 ml_prob = predict(latest[feature_cols].values)
                 auto_rr = calculate_auto_rr(df)
-                buy_cond = 0
-                sell_cond = 0
-                notes = []
-                if rsi < 30: buy_cond += 1; notes.append("RSI oversold")
-                elif rsi > 70: sell_cond += 1; notes.append("RSI overbought")
-                if macd > macd_sig: buy_cond += 1; notes.append("MACD bullish")
-                elif macd < macd_sig: sell_cond += 1; notes.append("MACD bearish")
-                if close < bb_l: buy_cond += 1; notes.append("Below lower BB")
-                elif close > bb_h: sell_cond += 1; notes.append("Above upper BB")
-                if sma_f > sma_s: buy_cond += 1; notes.append("SMA bull")
-                elif sma_f < sma_s: sell_cond += 1; notes.append("SMA bear")
-                if ml_prob > ML_CONFIDENCE: buy_cond += 1; notes.append(f"ML up {ml_prob:.2f}")
-                elif ml_prob < (1 - ML_CONFIDENCE): sell_cond += 1; notes.append(f"ML down {1-ml_prob:.2f}")
-                signal = "WAIT"
-                if buy_cond >= 3 and sell_cond == 0:
-                    signal = "BUY"
-                elif sell_cond >= 3 and buy_cond == 0:
-                    signal = "SELL"
-                send_telegram(f"📊 BTC/USD @ {close:.2f}\nRSI: {rsi:.1f}\nMACD: {'Bull' if macd > macd_sig else 'Bear'}\nSMA: {'Bull' if sma_f > sma_s else 'Bear'}\nML: {ml_prob:.2f}\nConfirmations: {buy_cond}/{sell_cond}\nSignal: {signal}\nAuto RR: {auto_rr:.2f}\nNotes: {', '.join(notes) if notes else 'None'}")
+                signal, reason, trend = generate_signal(df)
+                send_telegram(f"📊 BTC/USD @ {close:.2f}\nTrend: {trend}\nRSI: {rsi:.1f}\nMACD: {'Bull' if macd > macd_sig else 'Bear'}\nSMA: {'Bull' if sma_f > sma_s else 'Bear'}\nML: {ml_prob:.2f}\nSignal: {signal}\nAuto RR: {auto_rr:.2f}\nReason: {reason}")
         except Exception as e:
             send_telegram(f"Check signal failed: {e}")
     elif msg.startswith('/setrr'):
@@ -420,7 +417,7 @@ def main_loop():
                 df = get_stock_data(sym, days=1)
                 if df is None: continue
                 df = add_indicators(df)
-                signal, reason = generate_signal(df)
+                signal, reason, trend = generate_signal(df)
                 if signal == 'buy':
                     auto_rr = calculate_auto_rr(df)
                     latest = df.iloc[-1]
@@ -433,7 +430,7 @@ def main_loop():
             df = get_crypto_data(sym, timeframe="1Min", limit=100)
             if df is None: continue
             df = add_indicators(df)
-            signal, reason = generate_signal(df)
+            signal, reason, trend = generate_signal(df)
             if signal == 'buy':
                 auto_rr = calculate_auto_rr(df)
                 latest = df.iloc[-1]
@@ -451,7 +448,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting bot with /autostatus")
+    logging.info("Starting bot with trend detection")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
