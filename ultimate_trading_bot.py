@@ -40,6 +40,11 @@ MAX_TRADES_PER_DAY = 50
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
 ML_CONFIDENCE = 0.55
+DAILY_PROFIT_TARGET = 0.03
+TRAILING_STOP_ATR_MULT = 1.0
+VOLUME_FILTER = True
+SUPPORT_RESISTANCE_FILTER = True
+MULTI_TIMEFRAME = True
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,6 +60,7 @@ bot_running = True
 trade_journal = []
 last_check_time = "Never"
 last_error = "None"
+consecutive_losses = 0
 
 US_TZ = pytz.timezone("America/New_York")
 
@@ -93,6 +99,14 @@ def add_indicators(df):
     for c in feature_cols:
         if c not in df.columns: df[c] = 0
     return df
+
+def calculate_support_resistance(df, lookback=20):
+    if df is None or len(df) < lookback:
+        return None, None
+    recent = df.iloc[-lookback:]
+    support = recent['low'].min()
+    resistance = recent['high'].max()
+    return support, resistance
 
 def calculate_auto_rr(df):
     if df is None or len(df) < 50:
@@ -139,11 +153,14 @@ def equity():
         return 100000.0
 
 def position_size(price, atr):
-    risk = equity() * RISK_PER_TRADE_PCT
+    global consecutive_losses
+    risk_pct = RISK_PER_TRADE_PCT * (0.5 if consecutive_losses >= 2 else 1.0)
+    risk = equity() * risk_pct
     dist = STOP_LOSS_ATR_MULT * atr
     return risk / dist if dist > 0 else 0
 
 def daily_loss_hit(): return daily_pnl < -MAX_DAILY_LOSS_PCT * equity()
+def daily_profit_hit(): return daily_pnl > DAILY_PROFIT_TARGET * equity()
 def max_trades_hit(): return trades_today >= MAX_TRADES_PER_DAY
 
 def buy_stock(symbol, price, atr, reason, auto_rr):
@@ -156,7 +173,7 @@ def buy_stock(symbol, price, atr, reason, auto_rr):
     tp = price + (STOP_LOSS_ATR_MULT * atr) * auto_rr
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
     if order:
-        positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr}
+        positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
         msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
         send_telegram(msg)
@@ -173,7 +190,7 @@ def buy_crypto(symbol, price, atr, reason, auto_rr):
     tp = price + (STOP_LOSS_ATR_MULT * atr) * auto_rr
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
     if order:
-        positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr}
+        positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
         msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
         send_telegram(msg)
@@ -190,14 +207,14 @@ def sell_short_crypto(symbol, price, atr, reason, auto_rr):
     tp = price - (STOP_LOSS_ATR_MULT * atr) * auto_rr
     order = api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
     if order:
-        positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr}
+        positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price + TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
         msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
         send_telegram(msg)
         trade_journal.append(msg)
 
 def sell_position(key, reason="Manual"):
-    global positions, daily_pnl
+    global positions, daily_pnl, consecutive_losses
     if key not in positions: return
     pos = positions[key]
     try:
@@ -214,6 +231,10 @@ def sell_position(key, reason="Manual"):
             api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='buy', type='market', time_in_force='gtc')
         pnl = (price - pos['entry']) * pos['qty']
         daily_pnl += pnl
+        if pnl < 0:
+            consecutive_losses += 1
+        else:
+            consecutive_losses = 0
         msg = f"🔴 CLOSE {pos['symbol']} @ {price:.2f}\nReason: {reason}\nPnL: {pnl:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
@@ -234,9 +255,21 @@ def monitor_positions():
                 else:
                     bars = api.get_crypto_bars(pos['symbol'], "1Min", limit=1).df
                     price = float(bars['close'].iloc[-1])
+                # Trailing stop
+                if pos['type'] == 'crypto_short':
+                    new_trail = price + TRAILING_STOP_ATR_MULT*pos['atr']
+                    if new_trail < pos.get('trail', 999999):
+                        pos['trail'] = new_trail
+                        pos['sl'] = min(pos['sl'], new_trail)
+                else:
+                    new_trail = price - TRAILING_STOP_ATR_MULT*pos['atr']
+                    if new_trail > pos.get('trail', 0):
+                        pos['trail'] = new_trail
+                        pos['sl'] = max(pos['sl'], new_trail)
+                # Exit checks
                 if pos['type'] == 'crypto_short':
                     if price >= pos['sl'] or price <= pos['tp']:
-                        sell_position(key, "Short TP/SL hit")
+                        sell_position(key, "TP/SL hit")
                 else:
                     if price <= pos['sl'] or price >= pos['tp']:
                         sell_position(key, "TP/SL hit")
@@ -254,6 +287,15 @@ def generate_signal(df):
     sma_f, sma_s = latest['trend_sma_fast'], latest['trend_sma_slow']
     close = latest['close']
     ml_prob = predict(latest[feature_cols].values)
+
+    # Volume filter
+    avg_vol = df['volume'].rolling(20).mean().iloc[-1]
+    vol_ok = latest['volume'] > avg_vol if VOLUME_FILTER else True
+
+    # Support/Resistance
+    support, resistance = calculate_support_resistance(df)
+    near_support = close <= support * 1.005 if support else False
+    near_resistance = close >= resistance * 0.995 if resistance else False
 
     buy_cond = 0
     sell_cond = 0
@@ -290,9 +332,23 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append(f"ML down {ml_prob:.2f}")
 
-    if buy_cond >= 3 and sell_cond == 0:
+    if vol_ok:
+        buy_cond += 1
+        reasons.append("Volume OK")
+    else:
+        sell_cond += 1
+        reasons.append("Low volume")
+
+    if near_support:
+        buy_cond += 1
+        reasons.append("Near support")
+    elif near_resistance:
+        sell_cond += 1
+        reasons.append("Near resistance")
+
+    if buy_cond >= 4 and sell_cond == 0:
         return 'buy', "; ".join(reasons), trend
-    if sell_cond >= 3 and buy_cond == 0:
+    if sell_cond >= 4 and buy_cond == 0:
         return 'sell', "; ".join(reasons), trend
     return None, "No strong signal", trend
 
@@ -399,7 +455,7 @@ def handle_telegram_command(chat_id, msg):
             atr = price * 0.005
             sl = price - STOP_LOSS_ATR_MULT * atr
             tp = price + (STOP_LOSS_ATR_MULT * atr) * RR_RATIO
-            positions["crypto:BTC/USD"] = {'type':'crypto','symbol':'BTC/USD','qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr}
+            positions["crypto:BTC/USD"] = {'type':'crypto','symbol':'BTC/USD','qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
             send_telegram(f"🧪 TEST BUY {qty} BTC/USD @ {price:.2f}")
         except Exception as e:
             send_telegram(f"Test buy failed: {e}")
@@ -425,6 +481,10 @@ def main_loop():
             continue
         if daily_loss_hit():
             send_telegram("⚠️ Daily loss limit reached. Bot paused.")
+            bot_running = False
+            continue
+        if daily_profit_hit():
+            send_telegram("🎯 Daily profit target reached. Bot paused for the day.")
             bot_running = False
             continue
         if max_trades_hit():
@@ -478,7 +538,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting bot with balanced ML")
+    logging.info("Starting upgraded bot with filters")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
