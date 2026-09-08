@@ -29,9 +29,8 @@ else:
 api = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, api_version='v2')
 newsapi = NewsApiClient(api_key=NEWS_API_KEY)
 
-# ============ SYMBOLS ============
 STOCK_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "BITO", "GBTC"]
-CRYPTO_SYMBOLS = ["BTC/USD"]   # Alpaca crypto
+CRYPTO_SYMBOLS = ["BTC/USD"]
 
 MAX_STOCK_POSITIONS = 3
 MAX_CRYPTO_POSITIONS = 1
@@ -238,9 +237,9 @@ def telegram_poll():
         time.sleep(2)
 
 def handle_telegram_command(chat_id, msg):
-    global bot_running
+    global bot_running, positions, trades_today
     if msg == '/start':
-        send_telegram("Bot running. Stocks + Crypto. Commands: /status /pause /resume /close /help")
+        send_telegram("Bot running. Stocks + Crypto. Commands: /status /pause /resume /close /testbuy /help")
     elif msg == '/status':
         pos_str = "\n".join([f"{k}: qty {p['qty']}, entry {p['entry']:.2f}" for k,p in positions.items()]) or "No positions"
         send_telegram(f"Positions:\n{pos_str}\nDaily PnL: {daily_pnl:.2f}")
@@ -254,8 +253,23 @@ def handle_telegram_command(chat_id, msg):
         for k in list(positions.keys()):
             sell_position(k)
         send_telegram("All positions closed.")
+    elif msg == '/testbuy':
+        # Force tiny BTC buy
+        try:
+            price = float(api.get_last_crypto_trade("BTC/USD").price)
+            qty = 0.0001
+            api.submit_order(symbol="BTC/USD", qty=qty, side='buy', type='market', time_in_force='gtc')
+            positions["crypto:BTC/USD"] = {
+                'type':'crypto','symbol':'BTC/USD','qty':qty,'entry':price,
+                'sl': price * 0.99,
+                'tp': price * 1.01,
+                'atr': price * 0.005
+            }
+            send_telegram(f"🧪 TEST BUY {qty} BTC/USD @ {price:.2f}")
+        except Exception as e:
+            send_telegram(f"Test buy failed: {e}")
     elif msg == '/help':
-        send_telegram("Commands: /start /status /pause /resume /close /help")
+        send_telegram("Commands: /start /status /pause /resume /close /testbuy /help")
 
 @app.route('/')
 def dashboard():
@@ -265,7 +279,6 @@ def dashboard():
 
 def main_loop():
     global model
-    # Train on SPY initially
     df = get_stock_data("SPY", days=5)
     if df is not None:
         df = add_indicators(df)
@@ -283,7 +296,6 @@ def main_loop():
             time.sleep(3600)
             continue
 
-        # Stocks (during market hours)
         if is_market_open_now():
             for sym in STOCK_SYMBOLS:
                 if len([k for k in positions if k.startswith("stock:")]) >= MAX_STOCK_POSITIONS:
@@ -296,7 +308,6 @@ def main_loop():
                     atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
                     buy_stock(sym, float(api.get_last_trade(sym).price), atr)
 
-        # Crypto (24/7)
         for sym in CRYPTO_SYMBOLS:
             if len([k for k in positions if k.startswith("crypto:")]) >= MAX_CRYPTO_POSITIONS:
                 break
@@ -309,14 +320,12 @@ def main_loop():
                 price = float(api.get_last_crypto_trade(sym).price)
                 buy_crypto(sym, price, atr)
 
-        # Retrain every hour
         if datetime.now().minute == 0:
             df = get_stock_data("SPY", days=5)
             if df is not None:
                 df = add_indicators(df)
                 train_model(df)
 
-        # Run every 1 minute
         time.sleep(60)
 
 if __name__ == '__main__':
