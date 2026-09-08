@@ -160,7 +160,8 @@ def sell_position(key):
             price = float(api.get_last_trade(pos['symbol']).price)
             api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='sell', type='market', time_in_force='day')
         else:
-            price = float(api.get_latest_crypto_trade(pos['symbol']).price)
+            bars = api.get_crypto_bars(pos['symbol'], "1m", limit=1).df
+            price = float(bars['close'].iloc[-1])
             api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='sell', type='market', time_in_force='gtc')
         pnl = (price - pos['entry']) * pos['qty']
         daily_pnl += pnl
@@ -178,7 +179,8 @@ def monitor_positions():
                 if pos['type'] == 'stock':
                     price = float(api.get_last_trade(pos['symbol']).price)
                 else:
-                    price = float(api.get_latest_crypto_trade(pos['symbol']).price)
+                    bars = api.get_crypto_bars(pos['symbol'], "1m", limit=1).df
+                    price = float(bars['close'].iloc[-1])
                 if price <= pos['sl'] or price >= pos['tp']:
                     sell_position(key)
             except Exception as e:
@@ -255,7 +257,8 @@ def handle_telegram_command(chat_id, msg):
         send_telegram("All positions closed.")
     elif msg == '/testbuy':
         try:
-            price = float(api.get_latest_crypto_trade("BTC/USD").price)
+            bars = api.get_crypto_bars("BTC/USD", "1m", limit=1).df
+            price = float(bars['close'].iloc[-1])
             qty = 0.0001
             api.submit_order(symbol="BTC/USD", qty=qty, side='buy', type='market', time_in_force='gtc')
             positions["crypto:BTC/USD"] = {
@@ -316,7 +319,8 @@ def main_loop():
             if signal == 'buy':
                 latest = df.iloc[-1]
                 atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
-                price = float(api.get_latest_crypto_trade(sym).price)
+                bars = api.get_crypto_bars(sym, "1m", limit=1).df
+                price = float(bars['close'].iloc[-1])
                 buy_crypto(sym, price, atr)
 
         if datetime.now().minute == 0:
