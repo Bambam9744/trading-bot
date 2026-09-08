@@ -142,7 +142,9 @@ def buy_crypto(symbol, price, atr):
     key = f"crypto:{symbol}"
     if key in positions: return
     qty = round(position_size(price, atr) / price, 6)
-    if qty <= 0: return
+    # Ensure minimum $10 order
+    if qty * price < 10:
+        qty = round(10.0 / price, 6)
     sl = price - STOP_LOSS_ATR_MULT * atr
     tp = price + TAKE_PROFIT_ATR_MULT * atr
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
@@ -259,7 +261,7 @@ def handle_telegram_command(chat_id, msg):
         try:
             bars = api.get_crypto_bars("BTC/USD", "1Min", limit=1).df
             price = float(bars['close'].iloc[-1])
-            qty = 0.0001
+            qty = round(10.0 / price, 6)
             api.submit_order(symbol="BTC/USD", qty=qty, side='buy', type='market', time_in_force='gtc')
             positions["crypto:BTC/USD"] = {
                 'type':'crypto','symbol':'BTC/USD','qty':qty,'entry':price,
