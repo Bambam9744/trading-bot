@@ -53,6 +53,8 @@ model = None
 feature_cols = []
 bot_running = True
 trade_journal = []
+last_check_time = "Never"
+last_error = "None"
 
 US_TZ = pytz.timezone("America/New_York")
 
@@ -199,8 +201,10 @@ def sell_position(key, reason="Manual"):
         logging.error(f"Sell error {key}: {e}")
 
 def monitor_positions():
+    global last_check_time, last_error
     while True:
         time.sleep(15)
+        last_check_time = datetime.now().strftime("%H:%M:%S")
         for key in list(positions.keys()):
             pos = positions[key]
             try:
@@ -214,6 +218,7 @@ def monitor_positions():
                 elif price >= pos['tp']:
                     sell_position(key, "Take profit hit")
             except Exception as e:
+                last_error = str(e)
                 logging.error(f"Monitor {key}: {e}")
 
 def generate_signal(df):
@@ -278,10 +283,15 @@ def telegram_poll():
 def handle_telegram_command(chat_id, msg):
     global bot_running, positions, trades_today, RR_RATIO
     if msg == '/start':
-        send_telegram("Bot running. Commands: /status /journal /calc /checksignal /setrr /pause /resume /close /testbuy /help")
+        send_telegram("Bot running. Commands: /status /journal /calc /checksignal /autostatus /setrr /pause /resume /close /testbuy /help")
     elif msg == '/status':
         pos_str = "\n".join([f"{k}: qty {p['qty']}, entry {p['entry']:.2f}, TP {p['tp']:.2f}, SL {p['sl']:.2f}" for k,p in positions.items()]) or "No positions"
         send_telegram(f"Positions:\n{pos_str}\nDaily PnL: {daily_pnl:.2f}")
+    elif msg == '/autostatus':
+        auto_buy = "✅ ON" if bot_running else "❌ OFF"
+        auto_sell = "✅ ON" if bot_running else "❌ OFF"
+        monitoring = "✅ Yes" if bot_running else "❌ No"
+        send_telegram(f"🤖 Auto Status\nAuto Buy: {auto_buy}\nAuto Sell: {auto_sell}\nBot Running: {monitoring}\nLast Check: {last_check_time}\nLast Error: {last_error}\nTrades Today: {trades_today}\nDaily PnL: {daily_pnl:.2f}")
     elif msg == '/journal':
         j = "\n".join(trade_journal) if trade_journal else "No trades yet."
         send_telegram(f"📒 Journal:\n{j}")
@@ -374,7 +384,7 @@ def handle_telegram_command(chat_id, msg):
         except Exception as e:
             send_telegram(f"Test buy failed: {e}")
     elif msg == '/help':
-        send_telegram("Commands: /start /status /journal /calc /checksignal /setrr /pause /resume /close /testbuy /help")
+        send_telegram("Commands: /start /status /journal /calc /checksignal /autostatus /setrr /pause /resume /close /testbuy /help")
 
 @app.route('/')
 def dashboard():
@@ -383,7 +393,7 @@ def dashboard():
     return render_template_string(html)
 
 def main_loop():
-    global model
+    global model, last_check_time, last_error
     df = get_stock_data("SPY", days=5)
     if df is not None:
         df = add_indicators(df)
@@ -400,6 +410,8 @@ def main_loop():
         if max_trades_hit():
             time.sleep(3600)
             continue
+
+        last_check_time = datetime.now().strftime("%H:%M:%S")
 
         if is_market_open_now():
             for sym in STOCK_SYMBOLS:
@@ -439,7 +451,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting bot with /checksignal")
+    logging.info("Starting bot with /autostatus")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
