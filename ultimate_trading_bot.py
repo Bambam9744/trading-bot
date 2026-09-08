@@ -39,7 +39,7 @@ MAX_DAILY_LOSS_PCT = 0.05
 MAX_TRADES_PER_DAY = 50
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
-ML_CONFIDENCE = 0.5
+ML_CONFIDENCE = 0.55
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -283,12 +283,12 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append("MACD bearish")
 
-    if ml_prob > 0.5:
+    if ml_prob > 0.55:
         buy_cond += 1
         reasons.append(f"ML up {ml_prob:.2f}")
-    else:
+    elif ml_prob < 0.45:
         sell_cond += 1
-        reasons.append(f"ML down {1-ml_prob:.2f}")
+        reasons.append(f"ML down {ml_prob:.2f}")
 
     if buy_cond >= 3 and sell_cond == 0:
         return 'buy', "; ".join(reasons), trend
@@ -478,7 +478,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting bot with short support")
+    logging.info("Starting bot with balanced ML")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
