@@ -179,6 +179,23 @@ def buy_crypto(symbol, price, atr, reason, auto_rr):
         send_telegram(msg)
         trade_journal.append(msg)
 
+def sell_short_crypto(symbol, price, atr, reason, auto_rr):
+    global positions, trades_today
+    key = f"crypto_short:{symbol}"
+    if key in positions: return
+    qty = round(position_size(price, atr) / price, 6)
+    if qty * price < 10:
+        qty = round(10.0 / price, 6)
+    sl = price + STOP_LOSS_ATR_MULT * atr
+    tp = price - (STOP_LOSS_ATR_MULT * atr) * auto_rr
+    order = api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
+    if order:
+        positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr}
+        trades_today += 1
+        msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
+        send_telegram(msg)
+        trade_journal.append(msg)
+
 def sell_position(key, reason="Manual"):
     global positions, daily_pnl
     if key not in positions: return
@@ -187,13 +204,17 @@ def sell_position(key, reason="Manual"):
         if pos['type'] == 'stock':
             price = float(api.get_last_trade(pos['symbol']).price)
             api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='sell', type='market', time_in_force='day')
-        else:
+        elif pos['type'] == 'crypto':
             bars = api.get_crypto_bars(pos['symbol'], "1Min", limit=1).df
             price = float(bars['close'].iloc[-1])
             api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='sell', type='market', time_in_force='gtc')
+        elif pos['type'] == 'crypto_short':
+            bars = api.get_crypto_bars(pos['symbol'], "1Min", limit=1).df
+            price = float(bars['close'].iloc[-1])
+            api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='buy', type='market', time_in_force='gtc')
         pnl = (price - pos['entry']) * pos['qty']
         daily_pnl += pnl
-        msg = f"🔴 SELL {pos['symbol']} @ {price:.2f}\nReason: {reason}\nPnL: {pnl:.2f}"
+        msg = f"🔴 CLOSE {pos['symbol']} @ {price:.2f}\nReason: {reason}\nPnL: {pnl:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
         del positions[key]
@@ -213,10 +234,12 @@ def monitor_positions():
                 else:
                     bars = api.get_crypto_bars(pos['symbol'], "1Min", limit=1).df
                     price = float(bars['close'].iloc[-1])
-                if price <= pos['sl']:
-                    sell_position(key, "Stop loss hit")
-                elif price >= pos['tp']:
-                    sell_position(key, "Take profit hit")
+                if pos['type'] == 'crypto_short':
+                    if price >= pos['sl'] or price <= pos['tp']:
+                        sell_position(key, "Short TP/SL hit")
+                else:
+                    if price <= pos['sl'] or price >= pos['tp']:
+                        sell_position(key, "TP/SL hit")
             except Exception as e:
                 last_error = str(e)
                 logging.error(f"Monitor {key}: {e}")
@@ -425,7 +448,7 @@ def main_loop():
                     buy_stock(sym, float(api.get_last_trade(sym).price), atr, reason, auto_rr)
 
         for sym in CRYPTO_SYMBOLS:
-            if len([k for k in positions if k.startswith("crypto:")]) >= MAX_CRYPTO_POSITIONS:
+            if len([k for k in positions if k.startswith("crypto")]) >= MAX_CRYPTO_POSITIONS:
                 break
             df = get_crypto_data(sym, timeframe="1Min", limit=100)
             if df is None: continue
@@ -438,6 +461,13 @@ def main_loop():
                 bars = api.get_crypto_bars(sym, "1Min", limit=1).df
                 price = float(bars['close'].iloc[-1])
                 buy_crypto(sym, price, atr, reason, auto_rr)
+            elif signal == 'sell':
+                auto_rr = calculate_auto_rr(df)
+                latest = df.iloc[-1]
+                atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
+                bars = api.get_crypto_bars(sym, "1Min", limit=1).df
+                price = float(bars['close'].iloc[-1])
+                sell_short_crypto(sym, price, atr, reason, auto_rr)
 
         if datetime.now().minute == 0:
             df = get_stock_data("SPY", days=5)
@@ -448,7 +478,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting bot with trend detection")
+    logging.info("Starting bot with short support")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
