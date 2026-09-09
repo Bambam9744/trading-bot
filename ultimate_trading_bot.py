@@ -29,21 +29,19 @@ else:
 api = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE, api_version='v2')
 newsapi = NewsApiClient(api_key=NEWS_API_KEY)
 
-STOCK_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "BITO", "GBTC"]
-CRYPTO_SYMBOLS = ["BTC/USD"]
+STOCK_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "GOOG", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "BABA", "BITO", "GBTC"]
+CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]
 
-MAX_STOCK_POSITIONS = 4
-MAX_CRYPTO_POSITIONS = 2
+MAX_STOCK_POSITIONS = 6
+MAX_CRYPTO_POSITIONS = 3
 RISK_PER_TRADE_PCT = 0.02
 MAX_DAILY_LOSS_PCT = 0.05
-MAX_TRADES_PER_DAY = 200
+MAX_TRADES_PER_DAY = 300
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
 FIXED_PROFIT_TARGET = 500.0
 ML_CONFIDENCE = 0.45
 TRAILING_STOP_ATR_MULT = 1.0
-VOLUME_FILTER = False
-SUPPORT_RESISTANCE_FILTER = False
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -59,7 +57,6 @@ bot_running = True
 trade_journal = []
 last_check_time = "Never"
 last_error = "None"
-consecutive_losses = 0
 
 US_TZ = pytz.timezone("America/New_York")
 
@@ -208,7 +205,7 @@ def sell_short_crypto(symbol, price, atr, reason, auto_rr):
         trade_journal.append(msg)
 
 def sell_position(key, reason="Manual"):
-    global positions, daily_pnl, consecutive_losses
+    global positions, daily_pnl
     if key not in positions: return
     pos = positions[key]
     try:
@@ -225,10 +222,6 @@ def sell_position(key, reason="Manual"):
             api.submit_order(symbol=pos['symbol'], qty=pos['qty'], side='buy', type='market', time_in_force='gtc')
         pnl = (price - pos['entry']) * pos['qty']
         daily_pnl += pnl
-        if pnl < 0:
-            consecutive_losses += 1
-        else:
-            consecutive_losses = 0
         msg = f"🔴 CLOSE {pos['symbol']} @ {price:.2f}\nReason: {reason}\nPnL: {pnl:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
@@ -317,7 +310,6 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append(f"ML down {ml_prob:.2f}")
 
-    # Allow trades when majority bullish/bearish
     if buy_cond >= 2 and buy_cond > sell_cond:
         return 'buy', "; ".join(reasons), trend
     if sell_cond >= 2 and sell_cond > buy_cond:
@@ -461,6 +453,7 @@ def main_loop():
 
         last_check_time = datetime.now().strftime("%H:%M:%S")
 
+        # Stock trading
         if is_market_open_now():
             for sym in STOCK_SYMBOLS:
                 if len([k for k in positions if k.startswith("stock:")]) >= MAX_STOCK_POSITIONS:
@@ -475,6 +468,7 @@ def main_loop():
                     atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
                     buy_stock(sym, float(api.get_last_trade(sym).price), atr, reason, auto_rr)
 
+        # Crypto trading (24/7)
         for sym in CRYPTO_SYMBOLS:
             if len([k for k in positions if k.startswith("crypto")]) >= MAX_CRYPTO_POSITIONS:
                 break
@@ -506,7 +500,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting aggressive bot with majority signal")
+    logging.info("Starting direct execution bot")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
