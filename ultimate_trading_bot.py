@@ -39,6 +39,10 @@ STOP_LOSS_PCT = 0.01
 TAKE_PROFIT_PCT = 0.02
 TRAILING_STOP_PCT = 0.005
 
+USE_FIXED_TP_SL = False
+FIXED_TP_AMOUNT = 850.0
+FIXED_SL_AMOUNT = 850.0
+
 ML_CONFIDENCE = 0.45
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
@@ -124,8 +128,12 @@ def buy_stock(symbol, price, reason):
     qty = int(STOCK_TRADE_AMOUNT / price)
     if qty < 1:
         qty = 1
-    sl = price * (1 - STOP_LOSS_PCT)
-    tp = price * (1 + TAKE_PROFIT_PCT)
+    if USE_FIXED_TP_SL:
+        sl = price - FIXED_SL_AMOUNT
+        tp = price + FIXED_TP_AMOUNT
+    else:
+        sl = price * (1 - STOP_LOSS_PCT)
+        tp = price * (1 + TAKE_PROFIT_PCT)
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
     if order:
         positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'trail':sl}
@@ -143,8 +151,12 @@ def buy_crypto(symbol, price, reason):
     qty = round(CRYPTO_TRADE_AMOUNT / price, 6)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
-    sl = price * (1 - STOP_LOSS_PCT)
-    tp = price * (1 + TAKE_PROFIT_PCT)
+    if USE_FIXED_TP_SL:
+        sl = price - FIXED_SL_AMOUNT
+        tp = price + FIXED_TP_AMOUNT
+    else:
+        sl = price * (1 - STOP_LOSS_PCT)
+        tp = price * (1 + TAKE_PROFIT_PCT)
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
     if order:
         positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'trail':sl}
@@ -162,8 +174,12 @@ def sell_short_crypto(symbol, price, reason):
     qty = round(CRYPTO_TRADE_AMOUNT / price, 6)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
-    sl = price * (1 + STOP_LOSS_PCT)
-    tp = price * (1 - TAKE_PROFIT_PCT)
+    if USE_FIXED_TP_SL:
+        sl = price + FIXED_SL_AMOUNT
+        tp = price - FIXED_TP_AMOUNT
+    else:
+        sl = price * (1 + STOP_LOSS_PCT)
+        tp = price * (1 - TAKE_PROFIT_PCT)
     order = api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
     if order:
         positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'trail':sl}
@@ -313,8 +329,11 @@ def telegram_poll():
 
 def handle_telegram_command(chat_id, msg):
     global bot_running, positions, trades_today
+    global USE_FIXED_TP_SL, FIXED_TP_AMOUNT, FIXED_SL_AMOUNT
+    global STOP_LOSS_PCT, TAKE_PROFIT_PCT
+
     if msg == '/start':
-        send_telegram("Bot running. Commands: /status /journal /calc /checksignal /autostatus /forcebuy /pause /resume /close /testbuy /help")
+        send_telegram("Bot running. Commands: /status /journal /calc /checksignal /autostatus /forcebuy /settp /setsl /setrisk /pause /resume /close /testbuy /help")
     elif msg == '/status':
         pos_str = "\n".join([f"{k}: qty {p['qty']}, entry {p['entry']:.2f}, TP {p['tp']:.2f}, SL {p['sl']:.2f}" for k,p in positions.items()]) or "No positions"
         send_telegram(f"Positions:\n{pos_str}\nDaily PnL: {daily_pnl:.2f}")
@@ -330,9 +349,12 @@ def handle_telegram_command(chat_id, msg):
         try:
             bars = api.get_crypto_bars("BTC/USD", "1Min", limit=1).df
             price = float(bars['close'].iloc[-1])
-            atr = price * 0.005
-            sl = price * (1 - STOP_LOSS_PCT)
-            tp = price * (1 + TAKE_PROFIT_PCT)
+            if USE_FIXED_TP_SL:
+                sl = price - FIXED_SL_AMOUNT
+                tp = price + FIXED_TP_AMOUNT
+            else:
+                sl = price * (1 - STOP_LOSS_PCT)
+                tp = price * (1 + TAKE_PROFIT_PCT)
             risk = price - sl
             reward = tp - price
             send_telegram(f"📊 BTC/USD @ {price:.2f}\nSL: {sl:.2f}\nTP: {tp:.2f}\nRisk: {risk:.2f}\nReward: {reward:.2f}")
@@ -364,6 +386,31 @@ def handle_telegram_command(chat_id, msg):
             buy_crypto("BTC/USD", price, "Forced buy")
         except Exception as e:
             send_telegram(f"Force buy failed: {e}")
+    elif msg.startswith('/settp'):
+        try:
+            amount = float(msg.split()[1])
+            USE_FIXED_TP_SL = True
+            FIXED_TP_AMOUNT = amount
+            send_telegram(f"✅ Take Profit set to ${amount:.2f} per unit")
+        except Exception:
+            send_telegram("Usage: /settp 850")
+    elif msg.startswith('/setsl'):
+        try:
+            amount = float(msg.split()[1])
+            USE_FIXED_TP_SL = True
+            FIXED_SL_AMOUNT = amount
+            send_telegram(f"✅ Stop Loss set to ${amount:.2f} per unit")
+        except Exception:
+            send_telegram("Usage: /setsl 850")
+    elif msg.startswith('/setrisk'):
+        try:
+            pct = float(msg.split()[1]) / 100.0
+            USE_FIXED_TP_SL = False
+            STOP_LOSS_PCT = pct
+            TAKE_PROFIT_PCT = pct * 2.0
+            send_telegram(f"✅ Risk set to {pct*100:.1f}% (auto TP/SL)")
+        except Exception:
+            send_telegram("Usage: /setrisk 1.5")
     elif msg == '/pause':
         bot_running = False
         send_telegram("Trading paused.")
@@ -382,7 +429,7 @@ def handle_telegram_command(chat_id, msg):
         except Exception as e:
             send_telegram(f"Test buy failed: {e}")
     elif msg == '/help':
-        send_telegram("Commands: /start /status /journal /calc /checksignal /autostatus /forcebuy /pause /resume /close /testbuy /help")
+        send_telegram("Commands: /start /status /journal /calc /checksignal /autostatus /forcebuy /settp /setsl /setrisk /pause /resume /close /testbuy /help")
 
 @app.route('/')
 def dashboard():
@@ -439,7 +486,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting final working bot")
+    logging.info("Starting final working bot with fixed TP/SL commands")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
