@@ -36,15 +36,15 @@ MAX_STOCK_POSITIONS = 3
 MAX_CRYPTO_POSITIONS = 1
 RISK_PER_TRADE_PCT = 0.02
 MAX_DAILY_LOSS_PCT = 0.05
-MAX_TRADES_PER_DAY = 50
+MAX_TRADES_PER_DAY = 100
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
-ML_CONFIDENCE = 0.55
-DAILY_PROFIT_TARGET = 0.03
+FIXED_PROFIT_TARGET = 1000.0   # desired profit per trade
+ML_CONFIDENCE = 0.5
 TRAILING_STOP_ATR_MULT = 1.0
 VOLUME_FILTER = True
-SUPPORT_RESISTANCE_FILTER = True
-MULTI_TIMEFRAME = True
+SUPPORT_RESISTANCE_FILTER = False   # turned off to allow more trades
+MULTI_TIMEFRAME = False
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -100,14 +100,6 @@ def add_indicators(df):
         if c not in df.columns: df[c] = 0
     return df
 
-def calculate_support_resistance(df, lookback=20):
-    if df is None or len(df) < lookback:
-        return None, None
-    recent = df.iloc[-lookback:]
-    support = recent['low'].min()
-    resistance = recent['high'].max()
-    return support, resistance
-
 def calculate_auto_rr(df):
     if df is None or len(df) < 50:
         return RR_RATIO
@@ -152,30 +144,37 @@ def equity():
     except:
         return 100000.0
 
-def position_size(price, atr):
-    global consecutive_losses
-    risk_pct = RISK_PER_TRADE_PCT * (0.5 if consecutive_losses >= 2 else 1.0)
-    risk = equity() * risk_pct
-    dist = STOP_LOSS_ATR_MULT * atr
-    return risk / dist if dist > 0 else 0
+def position_size_for_profit(price, atr, desired_profit):
+    """Calculate qty such that if TP is hit, profit = desired_profit"""
+    risk_amount = equity() * RISK_PER_TRADE_PCT
+    stop_distance = STOP_LOSS_ATR_MULT * atr
+    # qty from risk
+    qty_risk = risk_amount / stop_distance
+    # qty from desired profit: profit = qty * (tp - entry)
+    # tp - entry = desired_profit / qty
+    # also tp - entry = (STOP_LOSS_ATR_MULT * atr) * RR_RATIO
+    # But we want fixed profit, so calculate qty = desired_profit / (RR_RATIO * stop_distance)
+    qty_profit = desired_profit / (RR_RATIO * stop_distance)
+    qty = min(qty_risk, qty_profit)  # use smaller to stay within risk
+    return qty
 
 def daily_loss_hit(): return daily_pnl < -MAX_DAILY_LOSS_PCT * equity()
-def daily_profit_hit(): return daily_pnl > DAILY_PROFIT_TARGET * equity()
 def max_trades_hit(): return trades_today >= MAX_TRADES_PER_DAY
 
 def buy_stock(symbol, price, atr, reason, auto_rr):
     global positions, trades_today
     key = f"stock:{symbol}"
     if key in positions: return
-    qty = int(position_size(price, atr))
+    qty = int(position_size_for_profit(price, atr, FIXED_PROFIT_TARGET))
     if qty < 1: return
-    sl = price - STOP_LOSS_ATR_MULT * atr
-    tp = price + (STOP_LOSS_ATR_MULT * atr) * auto_rr
+    stop_distance = STOP_LOSS_ATR_MULT * atr
+    sl = price - stop_distance
+    tp = price + stop_distance * RR_RATIO
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
     if order:
         positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
-        msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
+        msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} (target profit ${FIXED_PROFIT_TARGET})"
         send_telegram(msg)
         trade_journal.append(msg)
 
@@ -183,16 +182,17 @@ def buy_crypto(symbol, price, atr, reason, auto_rr):
     global positions, trades_today
     key = f"crypto:{symbol}"
     if key in positions: return
-    qty = round(position_size(price, atr) / price, 6)
+    qty = position_size_for_profit(price, atr, FIXED_PROFIT_TARGET)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
-    sl = price - STOP_LOSS_ATR_MULT * atr
-    tp = price + (STOP_LOSS_ATR_MULT * atr) * auto_rr
+    stop_distance = STOP_LOSS_ATR_MULT * atr
+    sl = price - stop_distance
+    tp = price + stop_distance * RR_RATIO
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
     if order:
         positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
-        msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
+        msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} (target profit ${FIXED_PROFIT_TARGET})"
         send_telegram(msg)
         trade_journal.append(msg)
 
@@ -200,16 +200,17 @@ def sell_short_crypto(symbol, price, atr, reason, auto_rr):
     global positions, trades_today
     key = f"crypto_short:{symbol}"
     if key in positions: return
-    qty = round(position_size(price, atr) / price, 6)
+    qty = position_size_for_profit(price, atr, FIXED_PROFIT_TARGET)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
-    sl = price + STOP_LOSS_ATR_MULT * atr
-    tp = price - (STOP_LOSS_ATR_MULT * atr) * auto_rr
+    stop_distance = STOP_LOSS_ATR_MULT * atr
+    sl = price + stop_distance
+    tp = price - stop_distance * RR_RATIO
     order = api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
     if order:
         positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price + TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
-        msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} AutoRR={auto_rr}"
+        msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} (target profit ${FIXED_PROFIT_TARGET})"
         send_telegram(msg)
         trade_journal.append(msg)
 
@@ -292,11 +293,6 @@ def generate_signal(df):
     avg_vol = df['volume'].rolling(20).mean().iloc[-1]
     vol_ok = latest['volume'] > avg_vol if VOLUME_FILTER else True
 
-    # Support/Resistance
-    support, resistance = calculate_support_resistance(df)
-    near_support = close <= support * 1.005 if support else False
-    near_resistance = close >= resistance * 0.995 if resistance else False
-
     buy_cond = 0
     sell_cond = 0
     reasons = []
@@ -325,10 +321,10 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append("MACD bearish")
 
-    if ml_prob > 0.55:
+    if ml_prob > 0.5:
         buy_cond += 1
         reasons.append(f"ML up {ml_prob:.2f}")
-    elif ml_prob < 0.45:
+    elif ml_prob < 0.5:
         sell_cond += 1
         reasons.append(f"ML down {ml_prob:.2f}")
 
@@ -339,16 +335,10 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append("Low volume")
 
-    if near_support:
-        buy_cond += 1
-        reasons.append("Near support")
-    elif near_resistance:
-        sell_cond += 1
-        reasons.append("Near resistance")
-
-    if buy_cond >= 4 and sell_cond == 0:
+    # Need at least 3 confirmations
+    if buy_cond >= 3 and sell_cond == 0:
         return 'buy', "; ".join(reasons), trend
-    if sell_cond >= 4 and buy_cond == 0:
+    if sell_cond >= 3 and buy_cond == 0:
         return 'sell', "; ".join(reasons), trend
     return None, "No strong signal", trend
 
@@ -483,10 +473,6 @@ def main_loop():
             send_telegram("⚠️ Daily loss limit reached. Bot paused.")
             bot_running = False
             continue
-        if daily_profit_hit():
-            send_telegram("🎯 Daily profit target reached. Bot paused for the day.")
-            bot_running = False
-            continue
         if max_trades_hit():
             time.sleep(3600)
             continue
@@ -538,7 +524,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting upgraded bot with filters")
+    logging.info("Starting bot with $1000 target")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
