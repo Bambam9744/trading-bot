@@ -32,14 +32,14 @@ newsapi = NewsApiClient(api_key=NEWS_API_KEY)
 STOCK_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "GOOG", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "BABA", "BITO", "GBTC"]
 CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]
 
-CRYPTO_TRADE_AMOUNT = 10.0   # $10 per crypto trade
-STOCK_TRADE_AMOUNT = 100.0   # $100 per stock trade
+CRYPTO_TRADE_AMOUNT = 10.0
+STOCK_TRADE_AMOUNT = 100.0
 
-STOP_LOSS_PCT = 0.01        # 1% stop loss
-TAKE_PROFIT_PCT = 0.02      # 2% take profit
+STOP_LOSS_PCT = 0.01
+TAKE_PROFIT_PCT = 0.02
+TRAILING_STOP_PCT = 0.005
 
 ML_CONFIDENCE = 0.45
-TRAILING_STOP_PCT = 0.005   # 0.5% trailing
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -214,7 +214,6 @@ def monitor_positions():
                     bars = api.get_crypto_bars(pos['symbol'], "1Min", limit=1).df
                     price = float(bars['close'].iloc[-1])
 
-                # Trailing stop
                 if pos['type'] == 'crypto_short':
                     new_trail = price * (1 + TRAILING_STOP_PCT)
                     if new_trail < pos.get('trail', 999999):
@@ -226,7 +225,6 @@ def monitor_positions():
                         pos['trail'] = new_trail
                         pos['sl'] = max(pos['sl'], new_trail)
 
-                # Exit checks
                 if pos['type'] == 'crypto_short':
                     if price >= pos['sl'] or price <= pos['tp']:
                         sell_position(key, "TP/SL hit")
@@ -403,10 +401,6 @@ def main_loop():
         if not bot_running:
             time.sleep(10)
             continue
-        if daily_loss_hit():
-            send_telegram("⚠️ Daily loss limit reached. Bot paused.")
-            bot_running = False
-            continue
 
         last_check_time = datetime.now().strftime("%H:%M:%S")
 
@@ -445,7 +439,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting corrected bot")
+    logging.info("Starting final working bot")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
