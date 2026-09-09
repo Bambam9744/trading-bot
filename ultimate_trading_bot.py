@@ -40,7 +40,7 @@ MAX_TRADES_PER_DAY = 200
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
 FIXED_PROFIT_TARGET = 500.0
-ML_CONFIDENCE = 0.45  # more aggressive
+ML_CONFIDENCE = 0.45
 TRAILING_STOP_ATR_MULT = 1.0
 VOLUME_FILTER = False
 SUPPORT_RESISTANCE_FILTER = False
@@ -317,9 +317,10 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append(f"ML down {ml_prob:.2f}")
 
-    if buy_cond >= 2 and sell_cond == 0:
+    # Allow trades when majority bullish/bearish
+    if buy_cond >= 2 and buy_cond > sell_cond:
         return 'buy', "; ".join(reasons), trend
-    if sell_cond >= 2 and buy_cond == 0:
+    if sell_cond >= 2 and sell_cond > buy_cond:
         return 'sell', "; ".join(reasons), trend
     return None, "No strong signal", trend
 
@@ -505,7 +506,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting aggressive bot")
+    logging.info("Starting aggressive bot with majority signal")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
