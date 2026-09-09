@@ -32,19 +32,18 @@ newsapi = NewsApiClient(api_key=NEWS_API_KEY)
 STOCK_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "TSLA", "BITO", "GBTC"]
 CRYPTO_SYMBOLS = ["BTC/USD"]
 
-MAX_STOCK_POSITIONS = 3
-MAX_CRYPTO_POSITIONS = 1
+MAX_STOCK_POSITIONS = 4
+MAX_CRYPTO_POSITIONS = 2
 RISK_PER_TRADE_PCT = 0.02
 MAX_DAILY_LOSS_PCT = 0.05
-MAX_TRADES_PER_DAY = 100
+MAX_TRADES_PER_DAY = 200
 STOP_LOSS_ATR_MULT = 1.5
 RR_RATIO = 2.0
-FIXED_PROFIT_TARGET = 1000.0   # desired profit per trade
-ML_CONFIDENCE = 0.5
+FIXED_PROFIT_TARGET = 500.0
+ML_CONFIDENCE = 0.45  # more aggressive
 TRAILING_STOP_ATR_MULT = 1.0
-VOLUME_FILTER = True
-SUPPORT_RESISTANCE_FILTER = False   # turned off to allow more trades
-MULTI_TIMEFRAME = False
+VOLUME_FILTER = False
+SUPPORT_RESISTANCE_FILTER = False
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -145,17 +144,11 @@ def equity():
         return 100000.0
 
 def position_size_for_profit(price, atr, desired_profit):
-    """Calculate qty such that if TP is hit, profit = desired_profit"""
     risk_amount = equity() * RISK_PER_TRADE_PCT
     stop_distance = STOP_LOSS_ATR_MULT * atr
-    # qty from risk
     qty_risk = risk_amount / stop_distance
-    # qty from desired profit: profit = qty * (tp - entry)
-    # tp - entry = desired_profit / qty
-    # also tp - entry = (STOP_LOSS_ATR_MULT * atr) * RR_RATIO
-    # But we want fixed profit, so calculate qty = desired_profit / (RR_RATIO * stop_distance)
     qty_profit = desired_profit / (RR_RATIO * stop_distance)
-    qty = min(qty_risk, qty_profit)  # use smaller to stay within risk
+    qty = min(qty_risk, qty_profit)
     return qty
 
 def daily_loss_hit(): return daily_pnl < -MAX_DAILY_LOSS_PCT * equity()
@@ -174,7 +167,7 @@ def buy_stock(symbol, price, atr, reason, auto_rr):
     if order:
         positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
-        msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} (target profit ${FIXED_PROFIT_TARGET})"
+        msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
 
@@ -192,7 +185,7 @@ def buy_crypto(symbol, price, atr, reason, auto_rr):
     if order:
         positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
-        msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} (target profit ${FIXED_PROFIT_TARGET})"
+        msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
 
@@ -210,7 +203,7 @@ def sell_short_crypto(symbol, price, atr, reason, auto_rr):
     if order:
         positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price + TRAILING_STOP_ATR_MULT*atr}
         trades_today += 1
-        msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f} (target profit ${FIXED_PROFIT_TARGET})"
+        msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
 
@@ -279,7 +272,7 @@ def monitor_positions():
                 logging.error(f"Monitor {key}: {e}")
 
 def generate_signal(df):
-    if df is None or len(df) < 50: return None, "No data", "WAIT"
+    if df is None or len(df) < 30: return None, "No data", "WAIT"
     df = add_indicators(df)
     latest, prev = df.iloc[-1], df.iloc[-2]
     rsi = latest['momentum_rsi']
@@ -289,28 +282,24 @@ def generate_signal(df):
     close = latest['close']
     ml_prob = predict(latest[feature_cols].values)
 
-    # Volume filter
-    avg_vol = df['volume'].rolling(20).mean().iloc[-1]
-    vol_ok = latest['volume'] > avg_vol if VOLUME_FILTER else True
-
     buy_cond = 0
     sell_cond = 0
     reasons = []
     trend = "WAIT"
 
-    if sma_f > sma_s and close > sma_s:
+    if sma_f > sma_s:
         trend = "UPTREND"
         buy_cond += 1
         reasons.append("SMA uptrend")
-    elif sma_f < sma_s and close < sma_s:
+    elif sma_f < sma_s:
         trend = "DOWNTREND"
         sell_cond += 1
         reasons.append("SMA downtrend")
 
-    if rsi > 50 and rsi < 70:
+    if rsi > 50:
         buy_cond += 1
         reasons.append("RSI bullish")
-    elif rsi < 50 and rsi > 30:
+    elif rsi < 50:
         sell_cond += 1
         reasons.append("RSI bearish")
 
@@ -321,24 +310,16 @@ def generate_signal(df):
         sell_cond += 1
         reasons.append("MACD bearish")
 
-    if ml_prob > 0.5:
+    if ml_prob > 0.45:
         buy_cond += 1
         reasons.append(f"ML up {ml_prob:.2f}")
-    elif ml_prob < 0.5:
+    elif ml_prob < 0.55:
         sell_cond += 1
         reasons.append(f"ML down {ml_prob:.2f}")
 
-    if vol_ok:
-        buy_cond += 1
-        reasons.append("Volume OK")
-    else:
-        sell_cond += 1
-        reasons.append("Low volume")
-
-    # Need at least 3 confirmations
-    if buy_cond >= 3 and sell_cond == 0:
+    if buy_cond >= 2 and sell_cond == 0:
         return 'buy', "; ".join(reasons), trend
-    if sell_cond >= 3 and buy_cond == 0:
+    if sell_cond >= 2 and buy_cond == 0:
         return 'sell', "; ".join(reasons), trend
     return None, "No strong signal", trend
 
@@ -524,7 +505,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting bot with $1000 target")
+    logging.info("Starting aggressive bot")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
