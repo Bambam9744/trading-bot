@@ -32,16 +32,14 @@ newsapi = NewsApiClient(api_key=NEWS_API_KEY)
 STOCK_SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "GOOG", "AMZN", "META", "NVDA", "TSLA", "NFLX", "AMD", "BABA", "BITO", "GBTC"]
 CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]
 
-MAX_STOCK_POSITIONS = 6
-MAX_CRYPTO_POSITIONS = 3
-RISK_PER_TRADE_PCT = 0.02
-MAX_DAILY_LOSS_PCT = 0.05
-MAX_TRADES_PER_DAY = 300
-STOP_LOSS_ATR_MULT = 1.5
-RR_RATIO = 2.0
-FIXED_PROFIT_TARGET = 500.0
+CRYPTO_TRADE_AMOUNT = 10.0   # $10 per crypto trade
+STOCK_TRADE_AMOUNT = 100.0   # $100 per stock trade
+
+STOP_LOSS_PCT = 0.01        # 1% stop loss
+TAKE_PROFIT_PCT = 0.02      # 2% take profit
+
 ML_CONFIDENCE = 0.45
-TRAILING_STOP_ATR_MULT = 1.0
+TRAILING_STOP_PCT = 0.005   # 0.5% trailing
 
 logging.basicConfig(filename="bot.log", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -96,27 +94,6 @@ def add_indicators(df):
         if c not in df.columns: df[c] = 0
     return df
 
-def calculate_auto_rr(df):
-    if df is None or len(df) < 50:
-        return RR_RATIO
-    latest = df.iloc[-1]
-    rsi = latest['momentum_rsi']
-    sma_fast = latest['trend_sma_fast']
-    sma_slow = latest['trend_sma_slow']
-    atr = latest['volatility_atr']
-    close = latest['close']
-    trend_strength = abs(sma_fast - sma_slow) / close if close > 0 else 0
-    vol_ratio = atr / close if close > 0 else 0.01
-
-    if trend_strength > 0.005 and vol_ratio > 0.01:
-        return 3.0
-    elif trend_strength > 0.002:
-        return 2.0
-    elif rsi < 25 or rsi > 75:
-        return 1.5
-    else:
-        return 1.0
-
 def train_model(df):
     global model
     df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
@@ -140,76 +117,62 @@ def equity():
     except:
         return 100000.0
 
-def position_size_for_profit(price, atr, desired_profit):
-    risk_amount = equity() * RISK_PER_TRADE_PCT
-    stop_distance = STOP_LOSS_ATR_MULT * atr
-    qty_risk = risk_amount / stop_distance
-    qty_profit = desired_profit / (RR_RATIO * stop_distance)
-    qty = min(qty_risk, qty_profit)
-    return qty
-
-def daily_loss_hit(): return daily_pnl < -MAX_DAILY_LOSS_PCT * equity()
-def max_trades_hit(): return trades_today >= MAX_TRADES_PER_DAY
-
-def buy_stock(symbol, price, atr, reason, auto_rr):
+def buy_stock(symbol, price, reason):
     global positions, trades_today
     key = f"stock:{symbol}"
     if key in positions: return
-    qty = int(position_size_for_profit(price, atr, FIXED_PROFIT_TARGET))
-    if qty < 1: return
-    stop_distance = STOP_LOSS_ATR_MULT * atr
-    sl = price - stop_distance
-    tp = price + stop_distance * RR_RATIO
+    qty = int(STOCK_TRADE_AMOUNT / price)
+    if qty < 1:
+        qty = 1
+    sl = price * (1 - STOP_LOSS_PCT)
+    tp = price * (1 + TAKE_PROFIT_PCT)
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
     if order:
-        positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
+        positions[key] = {'type':'stock','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'trail':sl}
         trades_today += 1
         msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
     else:
-        logging.error(f"Stock buy failed for {symbol}")
+        send_telegram(f"❌ Stock buy failed for {symbol}")
 
-def buy_crypto(symbol, price, atr, reason, auto_rr):
+def buy_crypto(symbol, price, reason):
     global positions, trades_today
     key = f"crypto:{symbol}"
     if key in positions: return
-    # Corrected: qty is already the number of coins from position_size_for_profit
-    qty = round(position_size_for_profit(price, atr, FIXED_PROFIT_TARGET), 6)
+    qty = round(CRYPTO_TRADE_AMOUNT / price, 6)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
-    stop_distance = STOP_LOSS_ATR_MULT * atr
-    sl = price - stop_distance
-    tp = price + stop_distance * RR_RATIO
+    sl = price * (1 - STOP_LOSS_PCT)
+    tp = price * (1 + TAKE_PROFIT_PCT)
     order = api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
     if order:
-        positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
+        positions[key] = {'type':'crypto','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'trail':sl}
         trades_today += 1
         msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
     else:
-        logging.error(f"Crypto buy failed for {symbol}")
+        send_telegram(f"❌ Crypto buy failed for {symbol}")
 
-def sell_short_crypto(symbol, price, atr, reason, auto_rr):
+def sell_short_crypto(symbol, price, reason):
     global positions, trades_today
     key = f"crypto_short:{symbol}"
     if key in positions: return
-    qty = round(position_size_for_profit(price, atr, FIXED_PROFIT_TARGET), 6)
+    qty = round(CRYPTO_TRADE_AMOUNT / price, 6)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
-    stop_distance = STOP_LOSS_ATR_MULT * atr
-    sl = price + stop_distance
-    tp = price - stop_distance * RR_RATIO
+    sl = price * (1 + STOP_LOSS_PCT)
+    tp = price * (1 - TAKE_PROFIT_PCT)
     order = api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
     if order:
-        positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price + TRAILING_STOP_ATR_MULT*atr}
+        positions[key] = {'type':'crypto_short','symbol':symbol,'qty':qty,'entry':price,'sl':sl,'tp':tp,'trail':sl}
         trades_today += 1
         msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
     else:
-        logging.error(f"Crypto short failed for {symbol}")
+        send_telegram(f"❌ Crypto short failed for {symbol}")
 
 def sell_position(key, reason="Manual"):
     global positions, daily_pnl
@@ -235,6 +198,7 @@ def sell_position(key, reason="Manual"):
         del positions[key]
     except Exception as e:
         logging.error(f"Sell error {key}: {e}")
+        send_telegram(f"❌ Sell error {key}: {e}")
 
 def monitor_positions():
     global last_check_time, last_error
@@ -249,17 +213,19 @@ def monitor_positions():
                 else:
                     bars = api.get_crypto_bars(pos['symbol'], "1Min", limit=1).df
                     price = float(bars['close'].iloc[-1])
+
                 # Trailing stop
                 if pos['type'] == 'crypto_short':
-                    new_trail = price + TRAILING_STOP_ATR_MULT*pos['atr']
+                    new_trail = price * (1 + TRAILING_STOP_PCT)
                     if new_trail < pos.get('trail', 999999):
                         pos['trail'] = new_trail
                         pos['sl'] = min(pos['sl'], new_trail)
                 else:
-                    new_trail = price - TRAILING_STOP_ATR_MULT*pos['atr']
+                    new_trail = price * (1 - TRAILING_STOP_PCT)
                     if new_trail > pos.get('trail', 0):
                         pos['trail'] = new_trail
                         pos['sl'] = max(pos['sl'], new_trail)
+
                 # Exit checks
                 if pos['type'] == 'crypto_short':
                     if price >= pos['sl'] or price <= pos['tp']:
@@ -348,9 +314,9 @@ def telegram_poll():
         time.sleep(2)
 
 def handle_telegram_command(chat_id, msg):
-    global bot_running, positions, trades_today, RR_RATIO
+    global bot_running, positions, trades_today
     if msg == '/start':
-        send_telegram("Bot running. Commands: /status /journal /calc /checksignal /autostatus /setrr /pause /resume /close /testbuy /help")
+        send_telegram("Bot running. Commands: /status /journal /calc /checksignal /autostatus /forcebuy /pause /resume /close /testbuy /help")
     elif msg == '/status':
         pos_str = "\n".join([f"{k}: qty {p['qty']}, entry {p['entry']:.2f}, TP {p['tp']:.2f}, SL {p['sl']:.2f}" for k,p in positions.items()]) or "No positions"
         send_telegram(f"Positions:\n{pos_str}\nDaily PnL: {daily_pnl:.2f}")
@@ -364,20 +330,14 @@ def handle_telegram_command(chat_id, msg):
         send_telegram(f"📒 Journal:\n{j}")
     elif msg == '/calc':
         try:
-            df = get_crypto_data("BTC/USD", timeframe="1Min", limit=100)
-            if df is not None:
-                df = add_indicators(df)
-                auto_rr = calculate_auto_rr(df)
-            else:
-                auto_rr = RR_RATIO
             bars = api.get_crypto_bars("BTC/USD", "1Min", limit=1).df
             price = float(bars['close'].iloc[-1])
             atr = price * 0.005
-            sl = price - STOP_LOSS_ATR_MULT * atr
-            tp = price + (STOP_LOSS_ATR_MULT * atr) * auto_rr
+            sl = price * (1 - STOP_LOSS_PCT)
+            tp = price * (1 + TAKE_PROFIT_PCT)
             risk = price - sl
             reward = tp - price
-            send_telegram(f"📊 BTC/USD @ {price:.2f}\nSL: {sl:.2f}\nTP: {tp:.2f}\nRisk: {risk:.2f}\nReward: {reward:.2f}\nAuto RR: {auto_rr:.2f}")
+            send_telegram(f"📊 BTC/USD @ {price:.2f}\nSL: {sl:.2f}\nTP: {tp:.2f}\nRisk: {risk:.2f}\nReward: {reward:.2f}")
         except Exception as e:
             send_telegram(f"Calc failed: {e}")
     elif msg == '/checksignal':
@@ -395,18 +355,17 @@ def handle_telegram_command(chat_id, msg):
                 sma_s = latest['trend_sma_slow']
                 close = latest['close']
                 ml_prob = predict(latest[feature_cols].values)
-                auto_rr = calculate_auto_rr(df)
                 signal, reason, trend = generate_signal(df)
-                send_telegram(f"📊 BTC/USD @ {close:.2f}\nTrend: {trend}\nRSI: {rsi:.1f}\nMACD: {'Bull' if macd > macd_sig else 'Bear'}\nSMA: {'Bull' if sma_f > sma_s else 'Bear'}\nML: {ml_prob:.2f}\nSignal: {signal}\nAuto RR: {auto_rr:.2f}\nReason: {reason}")
+                send_telegram(f"📊 BTC/USD @ {close:.2f}\nTrend: {trend}\nRSI: {rsi:.1f}\nMACD: {'Bull' if macd > macd_sig else 'Bear'}\nSMA: {'Bull' if sma_f > sma_s else 'Bear'}\nML: {ml_prob:.2f}\nSignal: {signal}\nReason: {reason}")
         except Exception as e:
             send_telegram(f"Check signal failed: {e}")
-    elif msg.startswith('/setrr'):
+    elif msg == '/forcebuy':
         try:
-            new_rr = float(msg.split()[1])
-            RR_RATIO = new_rr
-            send_telegram(f"✅ Manual Risk-to-Reward set to {RR_RATIO}")
-        except:
-            send_telegram("Usage: /setrr 2.0")
+            bars = api.get_crypto_bars("BTC/USD", "1Min", limit=1).df
+            price = float(bars['close'].iloc[-1])
+            buy_crypto("BTC/USD", price, "Forced buy")
+        except Exception as e:
+            send_telegram(f"Force buy failed: {e}")
     elif msg == '/pause':
         bot_running = False
         send_telegram("Trading paused.")
@@ -421,17 +380,11 @@ def handle_telegram_command(chat_id, msg):
         try:
             bars = api.get_crypto_bars("BTC/USD", "1Min", limit=1).df
             price = float(bars['close'].iloc[-1])
-            qty = round(10.0 / price, 6)
-            api.submit_order(symbol="BTC/USD", qty=qty, side='buy', type='market', time_in_force='gtc')
-            atr = price * 0.005
-            sl = price - STOP_LOSS_ATR_MULT * atr
-            tp = price + (STOP_LOSS_ATR_MULT * atr) * RR_RATIO
-            positions["crypto:BTC/USD"] = {'type':'crypto','symbol':'BTC/USD','qty':qty,'entry':price,'sl':sl,'tp':tp,'atr':atr,'trail':price - TRAILING_STOP_ATR_MULT*atr}
-            send_telegram(f"🧪 TEST BUY {qty} BTC/USD @ {price:.2f}")
+            buy_crypto("BTC/USD", price, "Test buy")
         except Exception as e:
             send_telegram(f"Test buy failed: {e}")
     elif msg == '/help':
-        send_telegram("Commands: /start /status /journal /calc /checksignal /autostatus /setrr /pause /resume /close /testbuy /help")
+        send_telegram("Commands: /start /status /journal /calc /checksignal /autostatus /forcebuy /pause /resume /close /testbuy /help")
 
 @app.route('/')
 def dashboard():
@@ -440,7 +393,7 @@ def dashboard():
     return render_template_string(html)
 
 def main_loop():
-    global model, last_check_time, last_error
+    global model, last_check_time, last_error, bot_running
     df = get_stock_data("SPY", days=5)
     if df is not None:
         df = add_indicators(df)
@@ -454,49 +407,34 @@ def main_loop():
             send_telegram("⚠️ Daily loss limit reached. Bot paused.")
             bot_running = False
             continue
-        if max_trades_hit():
-            time.sleep(3600)
-            continue
 
         last_check_time = datetime.now().strftime("%H:%M:%S")
 
         # Stocks
         if is_market_open_now():
             for sym in STOCK_SYMBOLS:
-                if len([k for k in positions if k.startswith("stock:")]) >= MAX_STOCK_POSITIONS:
-                    break
                 df = get_stock_data(sym, days=1)
                 if df is None: continue
                 df = add_indicators(df)
                 signal, reason, trend = generate_signal(df)
                 if signal == 'buy':
-                    auto_rr = calculate_auto_rr(df)
-                    latest = df.iloc[-1]
-                    atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
-                    buy_stock(sym, float(api.get_last_trade(sym).price), atr, reason, auto_rr)
+                    price = float(api.get_last_trade(sym).price)
+                    buy_stock(sym, price, reason)
 
         # Crypto
         for sym in CRYPTO_SYMBOLS:
-            if len([k for k in positions if k.startswith("crypto")]) >= MAX_CRYPTO_POSITIONS:
-                break
             df = get_crypto_data(sym, timeframe="1Min", limit=100)
             if df is None: continue
             df = add_indicators(df)
             signal, reason, trend = generate_signal(df)
             if signal == 'buy':
-                auto_rr = calculate_auto_rr(df)
-                latest = df.iloc[-1]
-                atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
                 bars = api.get_crypto_bars(sym, "1Min", limit=1).df
                 price = float(bars['close'].iloc[-1])
-                buy_crypto(sym, price, atr, reason, auto_rr)
+                buy_crypto(sym, price, reason)
             elif signal == 'sell':
-                auto_rr = calculate_auto_rr(df)
-                latest = df.iloc[-1]
-                atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
                 bars = api.get_crypto_bars(sym, "1Min", limit=1).df
                 price = float(bars['close'].iloc[-1])
-                sell_short_crypto(sym, price, atr, reason, auto_rr)
+                sell_short_crypto(sym, price, reason)
 
         if datetime.now().minute == 0:
             df = get_stock_data("SPY", days=5)
