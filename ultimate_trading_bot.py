@@ -167,12 +167,15 @@ def buy_stock(symbol, price, atr, reason, auto_rr):
         msg = f"🟢 BUY STOCK {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
+    else:
+        logging.error(f"Stock buy failed for {symbol}")
 
 def buy_crypto(symbol, price, atr, reason, auto_rr):
     global positions, trades_today
     key = f"crypto:{symbol}"
     if key in positions: return
-    qty = position_size_for_profit(price, atr, FIXED_PROFIT_TARGET)
+    # Corrected: qty is already the number of coins from position_size_for_profit
+    qty = round(position_size_for_profit(price, atr, FIXED_PROFIT_TARGET), 6)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
     stop_distance = STOP_LOSS_ATR_MULT * atr
@@ -185,12 +188,14 @@ def buy_crypto(symbol, price, atr, reason, auto_rr):
         msg = f"🟢 BUY CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
+    else:
+        logging.error(f"Crypto buy failed for {symbol}")
 
 def sell_short_crypto(symbol, price, atr, reason, auto_rr):
     global positions, trades_today
     key = f"crypto_short:{symbol}"
     if key in positions: return
-    qty = position_size_for_profit(price, atr, FIXED_PROFIT_TARGET)
+    qty = round(position_size_for_profit(price, atr, FIXED_PROFIT_TARGET), 6)
     if qty * price < 10:
         qty = round(10.0 / price, 6)
     stop_distance = STOP_LOSS_ATR_MULT * atr
@@ -203,6 +208,8 @@ def sell_short_crypto(symbol, price, atr, reason, auto_rr):
         msg = f"🔻 SHORT CRYPTO {qty} {symbol} @ {price:.2f}\nReason: {reason}\nSL={sl:.2f} TP={tp:.2f}"
         send_telegram(msg)
         trade_journal.append(msg)
+    else:
+        logging.error(f"Crypto short failed for {symbol}")
 
 def sell_position(key, reason="Manual"):
     global positions, daily_pnl
@@ -453,7 +460,7 @@ def main_loop():
 
         last_check_time = datetime.now().strftime("%H:%M:%S")
 
-        # Stock trading
+        # Stocks
         if is_market_open_now():
             for sym in STOCK_SYMBOLS:
                 if len([k for k in positions if k.startswith("stock:")]) >= MAX_STOCK_POSITIONS:
@@ -468,7 +475,7 @@ def main_loop():
                     atr = latest['volatility_atr'] if latest['volatility_atr'] > 0 else latest['close']*0.01
                     buy_stock(sym, float(api.get_last_trade(sym).price), atr, reason, auto_rr)
 
-        # Crypto trading (24/7)
+        # Crypto
         for sym in CRYPTO_SYMBOLS:
             if len([k for k in positions if k.startswith("crypto")]) >= MAX_CRYPTO_POSITIONS:
                 break
@@ -500,7 +507,7 @@ def main_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    logging.info("Starting direct execution bot")
+    logging.info("Starting corrected bot")
     threading.Thread(target=main_loop, daemon=True).start()
     threading.Thread(target=monitor_positions, daemon=True).start()
     threading.Thread(target=telegram_poll, daemon=True).start()
